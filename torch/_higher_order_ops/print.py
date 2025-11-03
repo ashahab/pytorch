@@ -3,9 +3,12 @@ import torch.utils._pytree as pytree
 from torch._ops import HigherOrderOperator
 
 
+# This is a functional version of torch.print to enable format printing
+# through calling such as
+# torch._higher_order_ops.print("moo {x} {y}", x=1, y=2)
 class Print(HigherOrderOperator):
     def __init__(self):
-        super().__init__("hop_print")
+        super().__init__("print")
         self._print_str = None
 
     def __call__(self, format_str, **kwargs):

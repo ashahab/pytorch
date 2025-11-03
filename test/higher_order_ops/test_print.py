@@ -17,12 +17,12 @@ class TestHopPrint(TestCase):
 
         counters.clear()
         x = torch.randn(3, 3)
-        opt_f = torch.compile(backend="eager")(f)
         with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-            opt_out = opt_f(x)
+            opt_out = f(x)
             printed_output = mock_stdout.getvalue().strip()
 
         self.assertEqual(printed_output, "moo")
+        self.assertEqual(len(counters["graph_break"]), 0)
 
     def test_para_print(self):
         def f(x):
@@ -33,12 +33,12 @@ class TestHopPrint(TestCase):
 
         counters.clear()
         x = torch.randn(3, 3)
-        opt_f = torch.compile(backend="eager")(f)
         with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-            opt_out = opt_f(x)
+            opt_out = f(x)
             printed_output = mock_stdout.getvalue().strip()
 
         self.assertEqual(printed_output, "moo 1 2")
+        self.assertEqual(len(counters["graph_break"]), 0)
 
 
 if __name__ == "__main__":
