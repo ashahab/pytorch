@@ -9,6 +9,7 @@ import sys
 import time
 import unittest
 from collections import defaultdict, deque, namedtuple, OrderedDict, UserDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import auto
 from typing import Any, NamedTuple, Optional
@@ -22,6 +23,7 @@ from torch.testing._internal.common_utils import (
     parametrize,
     run_tests,
     subtest,
+    TEST_WITH_TORCHDYNAMO,
     TestCase,
 )
 
@@ -1490,8 +1492,23 @@ class TestCxxPytree(TestCase):
         if IS_FBCODE:
             raise unittest.SkipTest("C++ pytree tests are not supported in fbcode")
 
+    def assertEqualSpecs(
+        self,
+        spec1,
+        spec2,
+        msg: str | Callable[[str], str] | None = None,
+    ):
+        if TEST_WITH_TORCHDYNAMO:
+            # The Dynamo polyfill returns a pure Python class for PyTreeSpec.
+            # So we compare the type names and reprs instead because the types
+            # themselves won't be equal.
+            self.assertEqual(type(spec1).__name__, type(spec2).__name__, msg=msg)
+            self.assertEqual(repr(spec1), repr(spec2), msg=msg)
+        else:
+            self.assertEqual(spec1, spec2, msg=msg)
+
     def test_treespec_equality(self):
-        self.assertEqual(cxx_pytree.treespec_leaf(), cxx_pytree.treespec_leaf())
+        self.assertEqualSpecs(cxx_pytree.treespec_leaf(), cxx_pytree.treespec_leaf())
 
     def test_treespec_repr(self):
         # Check that it looks sane
@@ -1521,16 +1538,11 @@ class TestCxxPytree(TestCase):
         ],
     )
     def test_pytree_serialize(self, spec):
-        self.assertEqual(
-            spec,
-            cxx_pytree.tree_structure(
-                cxx_pytree.tree_unflatten([0] * spec.num_leaves, spec)
-            ),
-        )
-
         serialized_spec = cxx_pytree.treespec_dumps(spec)
         self.assertIsInstance(serialized_spec, str)
-        self.assertEqual(spec, cxx_pytree.treespec_loads(serialized_spec))
+
+        roundtrip_spec = cxx_pytree.treespec_loads(serialized_spec)
+        self.assertEqualSpecs(roundtrip_spec, spec)
 
     def test_pytree_serialize_namedtuple(self):
         python_pytree._register_namedtuple(
@@ -1556,7 +1568,7 @@ class TestCxxPytree(TestCase):
         spec = cxx_pytree.tree_structure(GlobalDummyType(0, 1))
         serialized_spec = cxx_pytree.treespec_dumps(spec)
         roundtrip_spec = cxx_pytree.treespec_loads(serialized_spec)
-        self.assertEqual(roundtrip_spec, spec)
+        self.assertEqualSpecs(roundtrip_spec, spec)
 
         class LocalDummyType:
             def __init__(self, x, y):
@@ -1572,7 +1584,7 @@ class TestCxxPytree(TestCase):
         spec = cxx_pytree.tree_structure(LocalDummyType(0, 1))
         serialized_spec = cxx_pytree.treespec_dumps(spec)
         roundtrip_spec = cxx_pytree.treespec_loads(serialized_spec)
-        self.assertEqual(roundtrip_spec, spec)
+        self.assertEqualSpecs(roundtrip_spec, spec)
 
 
 instantiate_parametrized_tests(TestGenericPytree)
