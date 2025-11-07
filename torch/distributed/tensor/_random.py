@@ -101,6 +101,9 @@ def manual_seed(seed: int, device_mesh: DeviceMesh) -> None:
 
     # DTensor no longer maintains a copy of rng state. manual seed on dtensor is the same thing
     # as manual seed on torch.
+    #
+    # torch.manual_seed will handle LocalTensor mode correctly by
+    # iterating through all ranks if seed is a LocalIntNode.
     torch.manual_seed(seed)
 
 
@@ -239,41 +242,101 @@ class OffsetBasedRNGTracker(_RNGStateTracker):
     def _distribute_region(
         self, spec: DTensorSpec, generator: Optional[torch.Generator] = None
     ):
-        if generator is not None:
-            # This is a little hacky, but for any user-passed generator, we store its state under a unique key,
-            # not because we need to keep a copy of it but because its the easiest way to make it work with the
-            # existing set/get APIs. We also ensure we remove it from rng_states after each _distribute_region.
-            state = _PhiloxState(generator.get_state())
-        else:
-            state = _PhiloxState(self._get_device_state())
+        from torch.distributed._local_tensor import (
+            local_tensor_mode,
+            _get_rng_state,
+        )
 
-        if self.distribute_region_enabled:
-            if self._device.type == "hpu":
-                self._device_handle.set_rng_ctx("philox")
-            old_offset = state.offset
-            self._set_pre_op_offset(state, spec)
-            with torch.random.fork_rng(
-                devices=[self._device], device_type=self._device.type
-            ):
-                assert self._device_handle is not None
-                self._device_handle.set_rng_state(state.state)
+        lm = local_tensor_mode()
+        is_local_tensor_mode = lm is not None and not lm._disable
+
+        if is_local_tensor_mode:
+            # compute separate offsets for each virtual rank
+            assert lm is not None
+
+            base_state_tensor = (
+                generator.get_state()
+                if generator is not None
+                else self._get_device_state()
+            )
+
+            sync_state = _PhiloxState(base_state_tensor.clone())
+            base_state = _PhiloxState(base_state_tensor)
+            old_offset = base_state.offset
+
+            if self.distribute_region_enabled:
+                # sync all ranks to use rank 0's state
+                rank_0_state = lm._per_rank_rng_states[0]
+                rank_0_cpu, rank_0_cuda = rank_0_state
+
+                if self._device.type == "cuda":
+                    assert self._device.index in rank_0_cuda
+                    rank_0_device_state = rank_0_cuda[self._device.index]
+                else:
+                    rank_0_device_state = rank_0_cpu
+
+                rank_0_philox = _PhiloxState(rank_0_device_state)
+                synchronized_seed = rank_0_philox.seed
+                base_offset = rank_0_philox.offset
+
+                sync_state.seed = synchronized_seed
+                sync_state.offset = base_offset
+
+                # populate _per_rank_offsets in sync_state
+                self._set_pre_op_offset(sync_state, spec)
+                assert hasattr(sync_state, "_per_rank_offsets")
+                # create per-rank states with synchronized seed and computed offsets
+                for rank in sorted(lm.ranks):
+                    rank_state = _PhiloxState(sync_state.state.clone())
+                    rank_state.offset = sync_state._per_rank_offsets[rank]
+                    self._device_handle.set_rng_state(rank_state.state)
+                    lm._per_rank_rng_states[rank] = _get_rng_state()
+
                 try:
                     yield  # execute the region code
                 finally:
-                    # update offset to synchronize among ranks
-                    self._set_post_op_offset(state, spec, old_offset)
-            if self._device.type == "hpu":
-                self._device_handle.unset_rng_ctx("philox")
-        else:
-            yield
+                    self._set_post_op_offset(sync_state.state, spec, base_offset)
+                    for rank in sorted(lm.ranks):
+                        rank_state = _PhiloxState(sync_state.state.clone())
+                        rank_state.offset = sync_state.state._per_rank_offsets[rank]
+                        self._device_handle.set_rng_state(rank_state.state)
+                        lm._per_rank_rng_states[rank] = _get_rng_state()
+            else:
+                yield
 
-        if generator is not None:
-            # ensure we (a) propagate the state advancement back to the user's RNG so its visible and impacts any future
-            # usage of that RNG (dtensor or non-dtensor), (b) drop it from our own cache so that if the user updates
-            # the seed value in their rng and uses it with DTensor again, we always use the latest value
-            generator.set_state(state.state)
+            if generator is not None:
+                generator.set_state(sync_state.state)
+            else:
+                self._set_device_state(base_state.state)
+
         else:
-            self._set_device_state(state.state)
+            if generator is not None:
+                state = _PhiloxState(generator.get_state())
+            else:
+                state = _PhiloxState(self._get_device_state())
+
+            if self.distribute_region_enabled:
+                if self._device.type == "hpu":
+                    self._device_handle.set_rng_ctx("philox")
+                old_offset = state.offset
+                self._set_pre_op_offset(state, spec)
+                with torch.random.fork_rng(
+                    devices=[self._device], device_type=self._device.type
+                ):
+                    assert self._device_handle is not None
+                    self._device_handle.set_rng_state(state.state)
+                    try:
+                        yield  # execute the region code
+                    finally:
+                        # update offset to synchronize among ranks
+                        self._set_post_op_offset(state, spec, old_offset)
+            else:
+                yield
+
+            if generator is not None:
+                generator.set_state(state.state)
+            else:
+                self._set_device_state(state.state)
 
     def _set_pre_op_offset(self, state: _PhiloxState, spec: DTensorSpec) -> None:
         """Set the starting RNG offset for current device's local shard before actual
@@ -323,6 +386,8 @@ class OffsetBasedRNGTracker(_RNGStateTracker):
             The last value to calculate before obtaining the starting offset is the shard linear index.
             The starting offset for each rank will be its shard_linear_index * local_tensor_numel.
         """
+        from torch.distributed._local_tensor import local_tensor_mode, LocalIntNode
+
         dtensor_shape = spec.shape
         mesh = spec.mesh
         # note: dim_map does not allow double sharding which is the FSDP(fully_shard)+TP
@@ -388,10 +453,34 @@ class OffsetBasedRNGTracker(_RNGStateTracker):
         # get current RNG offset
         current_offset = state.offset
 
-        # pytorch: offset must be multiple of 4
-        # source: aten/src/ATen/cuda/CUDAGeneratorImpl.cpp
-        offset_incr = (shard_linear_idx * local_size + 3) // 4 * 4
-        state.offset = current_offset + offset_incr
+        lm = local_tensor_mode()
+        if lm is not None and not lm._disable:
+            if not hasattr(state, "_per_rank_offsets"):
+                state._per_rank_offsets = {}  # type: ignore[attr-defined]
+
+            assert hasattr(state, "_per_rank_offsets")
+
+            if isinstance(shard_linear_idx, torch.SymInt) and isinstance(
+                shard_linear_idx.node, LocalIntNode
+            ):
+                # diff shard indices per rank
+                for rank in lm.ranks:
+                    rank_shard_idx = int(shard_linear_idx.node._local_ints[rank])
+                    offset_incr = (rank_shard_idx * local_size + 3) // 4 * 4
+                    state._per_rank_offsets[rank] = current_offset + offset_incr
+            else:
+                # same shard index for all ranks (e.g., all-replicate)
+                if isinstance(shard_linear_idx, torch.SymInt):
+                    shard_linear_idx = int(shard_linear_idx)
+                offset_incr = (shard_linear_idx * local_size + 3) // 4 * 4
+                # assign same offset to all ranks
+                for rank in lm.ranks:
+                    state._per_rank_offsets[rank] = current_offset + offset_incr
+        else:
+            # pytorch: offset must be multiple of 4
+            # source: aten/src/ATen/cuda/CUDAGeneratorImpl.cpp
+            offset_incr = (shard_linear_idx * local_size + 3) // 4 * 4
+            state.offset = current_offset + offset_incr
 
     def _set_post_op_offset(
         self, state: _PhiloxState, spec: DTensorSpec, old_offset: int
@@ -409,6 +498,8 @@ class OffsetBasedRNGTracker(_RNGStateTracker):
         Returns:
             None
         """
+        from torch.distributed._local_tensor import local_tensor_mode
+
         dtensor_shape = spec.shape
 
         from torch.distributed.tensor._ops.utils import prod
@@ -417,7 +508,17 @@ class OffsetBasedRNGTracker(_RNGStateTracker):
         # pytorch: offset must be multiple of 4
         # source: aten/src/ATen/cuda/CUDAGeneratorImpl.cpp
         numel = (numel + 3) // 4 * 4
-        state.offset = old_offset + numel
+
+        lm = local_tensor_mode()
+        if lm is not None:
+            if not hasattr(state, "_per_rank_offsets"):
+                state._per_rank_offsets = {}  # type: ignore[attr-defined]
+            assert hasattr(state, "_per_rank_offsets")
+            # each rank gets the same offset
+            for rank in lm.ranks:
+                state._per_rank_offsets[rank] = old_offset + numel
+        else:
+            state.offset = old_offset + numel
 
     def _calc_shard_linear_idx(
         self, shard_coord: list[int], shard_size: list[int]

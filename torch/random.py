@@ -39,6 +39,30 @@ def manual_seed(seed) -> torch._C.Generator:
             is raised. Negative inputs are remapped to positive values with the formula
             `0xffff_ffff_ffff_ffff + seed`.
     """
+    # TODO: probably don't do this here... just monkey patch it?
+    from torch.distributed._local_tensor import (
+        local_tensor_mode,
+        LocalIntNode,
+        _get_rng_state,
+    )
+
+    lm = local_tensor_mode()
+
+    if (
+        lm is not None
+        and isinstance(seed, torch.SymInt)
+        and isinstance(seed.node, LocalIntNode)
+    ):
+        for rank in sorted(lm.ranks):
+            rank_seed = seed.node._local_ints[rank]
+            _manual_seed_impl(rank_seed, update_local_tensor_states=False)
+            lm._per_rank_rng_states[rank] = _get_rng_state()
+        return default_generator
+
+    return _manual_seed_impl(seed, update_local_tensor_states=True)
+
+
+def _manual_seed_impl(seed, update_local_tensor_states) -> torch._C.Generator:
     seed = int(seed)
     import torch.cuda
 
@@ -57,7 +81,26 @@ def manual_seed(seed) -> torch._C.Generator:
 
     _seed_custom_device(seed)
 
-    return default_generator.manual_seed(seed)
+    try:
+        return default_generator.manual_seed(seed)
+    finally:
+        if update_local_tensor_states:
+            from torch.distributed._local_tensor import (
+                local_tensor_mode,
+            )
+
+            lm = local_tensor_mode()
+            if lm is not None and len(lm._per_rank_rng_states) > 0:
+                from torch.distributed._local_tensor import (
+                    _get_rng_state,
+                )
+
+                cpu_state, cuda_states = _get_rng_state()
+                for rank in lm.ranks:
+                    lm._per_rank_rng_states[rank] = (
+                        cpu_state.clone(),
+                        {idx: state.clone() for idx, state in cuda_states.items()},
+                    )
 
 
 def seed() -> int:
@@ -110,12 +153,44 @@ def _seed_custom_device(seed) -> None:
             warnings.warn(message, UserWarning, stacklevel=3)
 
 
-def initial_seed() -> int:
+def initial_seed():
     r"""Returns the initial seed for generating random numbers as a
     Python `long`.
 
     .. note:: The returned seed is for the default generator on CPU only.
+
+    In LocalTensor mode, returns a SymInt(LocalIntNode) with per-rank seeds.
     """
+    # Handle LocalTensor mode (lazy import to avoid circular dependency)
+    try:
+        from torch.distributed._local_tensor import (
+            local_tensor_mode,
+            LocalIntNode,
+            _set_rng_state,
+        )
+
+        lm = local_tensor_mode()
+        if (
+            lm is not None
+            and hasattr(lm, "_per_rank_rng_states")
+            and len(lm._per_rank_rng_states) > 0
+        ):
+            # LocalTensor mode: return a LocalIntNode with per-rank seeds
+            rank_seeds = {}
+
+            for rank in sorted(lm.ranks):
+                # Temporarily restore this rank's RNG state to read its seed
+                _set_rng_state(*lm._per_rank_rng_states[rank])
+                rank_seeds[rank] = default_generator.initial_seed()
+
+            # Create a LocalIntNode with per-rank seeds
+            local_int_node = LocalIntNode(rank_seeds)
+            return torch.SymInt(local_int_node)
+    except ImportError:
+        # torch.distributed not available, proceed normally
+        pass
+
+    # Regular mode: return the current seed
     return default_generator.initial_seed()
 
 

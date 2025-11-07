@@ -75,14 +75,23 @@ from torch.fx.experimental._constant_symnode import ConstantIntNode
 from torch.nested._internal.nested_int import NestedIntNode
 from torch.utils import _pytree as pytree
 from torch.utils._mode_utils import no_dispatch
-from torch.utils._python_dispatch import return_and_correct_aliasing, TorchDispatchMode
+from torch.utils._python_dispatch import (
+    return_and_correct_aliasing,
+    TorchDispatchMode,
+    _get_current_dispatch_mode_stack,
+)
 from torch.utils.checkpoint import get_device_states, set_device_states
-
 
 not_implemented_log = torch._logging.getArtifactLogger(__name__, "not_implemented")
 
 
 from . import _c10d
+
+
+def _is_in_fake_tensor_mode() -> bool:
+    return any(
+        isinstance(mode, FakeTensorMode) for mode in _get_current_dispatch_mode_stack()
+    )
 
 
 def _is_inplace_op(op: OpOverload | Callable[..., Any]) -> bool:
@@ -255,20 +264,30 @@ def _for_each_rank_run_func(
         a.wait() if isinstance(a, AsyncCollectiveTensor) else a for a in flat_args
     ]
 
-    # NB: Before invoking an op we are collecting rng states from CPU and
-    # CUDA devices such that we can reset to the same before invoking op
-    # for each rank. This is not very efficient and will likely be revisited
-    # to support per rank rng state.
-    rng_state = _get_rng_state()
+    lm: LocalTensorMode | None = local_tensor_mode()
+    use_per_rank_rng = lm is not None and len(lm._per_rank_rng_states) > 0
+
+    global_rng_state = None if use_per_rank_rng else _get_rng_state()
+
     flat_rank_rets = {}
 
     default_value: Tensor | None = None
     for r in sorted(ranks):
-        _set_rng_state(*rng_state)
+        if use_per_rank_rng:
+            assert lm is not None
+            _set_rng_state(*lm._per_rank_rng_states[r])
+        else:
+            assert global_rng_state is not None
+            _set_rng_state(*global_rng_state)
+
         rank_flat_args = [_map_to_rank_local_val(a, r) for a in flat_args]
         rank_args, rank_kwargs = pytree.tree_unflatten(rank_flat_args, args_spec)
         rank_ret = func(*rank_args, **rank_kwargs)
         flat_rank_rets[r] = rank_ret
+
+        if use_per_rank_rng:
+            assert lm is not None
+            lm._per_rank_rng_states[r] = _get_rng_state()
 
         if default_value is None and func is torch.ops.aten.split.Tensor:
             # If split happens over the dimension smaller than the number of chunks
@@ -773,11 +792,24 @@ class LocalTensorMode(TorchDispatchMode):
             self.ranks = ranks
         self._disable = False
         self._old_get_coordinate = None
+        self._per_rank_rng_states: dict[
+            int, tuple[torch.Tensor, dict[int, torch.Tensor]]
+        ] = {}
 
     def __enter__(self) -> "LocalTensorMode":
         self._disable = False
         self._patch_device_mesh()
         _LOCAL_TENSOR_MODE.append(self)
+
+        # _distribute_region will compute correct per-shard offsets
+        # but we want all ranks to start with the same state
+        if not _is_in_fake_tensor_mode():
+            cpu_state, cuda_states = _get_rng_state()
+            for rank in self.ranks:
+                self._per_rank_rng_states[rank] = (
+                    cpu_state.clone(),
+                    {idx: state.clone() for idx, state in cuda_states.items()},
+                )
 
         return super().__enter__()
 
