@@ -769,13 +769,7 @@ class record_function(ContextDecorator):
         self.args: Optional[str] = args
         # Whether or not we should run record function's end callbacks when exiting.
         self.run_callbacks_on_exit: bool = True
-        # TODO: TorchScript ignores standard type annotation here
-        # self.record: Optional["torch.classes.profiler._RecordFunction"] = None
-        self.record = torch.jit.annotate(
-            # pyrefly: ignore [not-a-type]
-            Optional["torch.classes.profiler._RecordFunction"],
-            None,
-        )
+        self.record: Optional["torch.classes.profiler._RecordFunction"] = None
 
     def __enter__(self):
         self.record = torch.ops.profiler._record_function_enter_new(
