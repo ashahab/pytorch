@@ -1,6 +1,8 @@
 # mypy: allow-untyped-defs
 import logging
 from collections.abc import Sequence
+from functools import partial
+from pathlib import Path
 from typing import Any
 
 import sympy
@@ -13,7 +15,7 @@ from torch._inductor.virtualized import V
 from .. import config as inductor_config
 from ..codegen.wrapper import PythonWrapperCodegen
 from ..ir import _IntLike, Layout, TensorBox
-from ..utils import get_num_sms, TMA_DESCRIPTOR_SIZE
+from ..utils import get_num_sms, load_template, TMA_DESCRIPTOR_SIZE
 
 
 log = logging.getLogger(__name__)
@@ -300,3 +302,7 @@ def is_batch_stride_largest(mat1, mat2, layout) -> bool:
             return False
 
     return True
+
+
+_KERNEL_TEMPLATE_DIR = Path(__file__).parent / "templates"
+load_kernel_template = partial(load_template, template_dir=_KERNEL_TEMPLATE_DIR)
