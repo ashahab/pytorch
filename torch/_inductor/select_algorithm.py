@@ -2665,9 +2665,6 @@ class AlgorithmSelectorCache(PersistentCache):
 
         self._register_default_preprocessing_fns()
 
-        self.async_autotuning_unpaused: threading.Event = threading.Event()
-        self.async_autotuning_unpaused.set()
-
         # registers `self.cache_clear(...)` to be called when a fresh Inductor cache is requested
         clear_on_fresh_cache(self)
 
@@ -2937,13 +2934,8 @@ class AlgorithmSelectorCache(PersistentCache):
                     or c.hint_override == hint_override
                 ]
                 while True:
-                    if (not this_has_priority.is_set()) and (not self.async_autotuning_unpaused.is_set()):
-                        # async autotuning is paused, let's cycle back in a bit
-                        time.sleep(0.5)
-                        continue
                     try:
-                        with _lock_gpu(timeout=0.5):
-                            setattr(threadlocal, "__torchinductor_gpu_lock_bypass", True)
+                        with _lock_gpu(timeout=0.5, priority=this_has_priority.is_set()):
                             timings = do_autotuning(
                                 filtered_choices, precompile_fn, hint_override=hint_override
                             )
@@ -2951,7 +2943,6 @@ class AlgorithmSelectorCache(PersistentCache):
                         break
                     except FileLockTimeoutError:
                         # we couldn't acquire the lock in time, we'll try again later
-                        time.sleep(0.5)
                         continue
                 min_extern_choice = float("inf")
                 for choice, timing in timings.items():
@@ -2974,19 +2965,13 @@ class AlgorithmSelectorCache(PersistentCache):
 
             def async_get_timings(hint_override: Optional[int] = None):
                 try:
-                    # wait indefinitely, until async autotuning is unpaused
-                    self.async_autotuning_unpaused.wait()
                     # signal that this async (or non-async) get_timings
-                    # call has priority and can bypass the paused event
+                    # call has priority and can skip the locking queue
                     this_has_priority.set()
-                    # pause async autotuning so we can obtain priority
-                    self.async_autotuning_unpaused.clear()
                     if hint_override:
                         return get_timings(hint_override)
                     return get_timings_future.result()
                 finally:
-                    # unpause async autotuning, so other threads can proceed
-                    self.async_autotuning_unpaused.set()
                     # this get_timings no longer has priority
                     this_has_priority.clear()
 
