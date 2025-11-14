@@ -7,6 +7,7 @@ from filelock import FileLock
 from functools import cached_property, wraps
 from itertools import chain
 from statistics import median
+from threading import Lock
 from typing import Any, Concatenate, Generator, Optional, Union
 from typing_extensions import ParamSpec, Self, TypeVar
 
@@ -15,6 +16,7 @@ import torch.utils._pytree as pytree
 from torch._dynamo.utils import counters, dynamo_timed
 from torch._inductor.config import use_experimental_benchmarker
 from torch._inductor.runtime.runtime_utils import default_cache_dir
+from torch._inductor.runtime.caching import FileLockTimeoutError
 from torch._inductor.runtime.caching.locks import _acquire_flock_with_timeout
 
 
@@ -33,14 +35,32 @@ T = TypeVar("T")
 
 # timeout, in seconds, when attempting to lock the gpu
 GPU_TIMEOUT: float = 60.0 * 60.0
+GPU_PRIORITY_LOCK: Lock = Lock()
 
 @contextmanager
-def _lock_gpu(timeout: float = GPU_TIMEOUT) -> Generator[None, None, None]:
+def _lock_gpu(timeout: float = GPU_TIMEOUT, priority: bool = True) -> Generator[None, None, None]:
+    start_t: float = time.time()
+    if priority:
+        GPU_PRIORITY_LOCK.acquire()
     device: torch.device = torch.device("cuda")
     flock_name: str = f"{device.type}_{device.index or torch.cuda.current_device()}.lock"
     flock: FileLock = FileLock(default_cache_dir() + f"/locks/{flock_name}")
-    with _acquire_flock_with_timeout(flock, timeout=timeout):
-        yield
+    while True:
+        if (time.time() - start_t) > timeout:
+            raise FileLockTimeoutError(flock, timeout)
+
+        if GPU_PRIORITY_LOCK.locked() and not priority:
+            time.sleep(0.5)
+            continue
+
+        try:
+            with _acquire_flock_with_timeout(flock, timeout=0.5):
+                yield
+        finally:
+            if priority:
+                GPU_PRIORITY_LOCK.release()
+
+        break
 
 def lock_gpu(fn: Callable[P, R]) -> Callable[P, R]:
     @wraps(fn)
