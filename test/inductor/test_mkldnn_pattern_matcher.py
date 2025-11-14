@@ -1164,6 +1164,26 @@ class TestPatternMatcher(TestPatternMatcherBase):
             quantization_with_autocast=quantization_with_autocast,
         )
 
+        if not int8_mixed_bf16 and not quantization_with_autocast:
+            if torch._inductor.config.cpp_wrapper:
+                self._test_code_common(
+                    mod,
+                    (v,),
+                    [f"aoti_torch_{device}__qconv_pointwise_tensor"],
+                    [],
+                    check_quantization=True,
+                    num_include_ops=[3],
+                )
+            else:
+                self._test_code_common(
+                    mod,
+                    (v,),
+                    ["torch.ops.onednn.qconv_pointwise.tensor"],
+                    [],
+                    check_quantization=True,
+                    num_include_ops=[3],
+                )
+
     @skipIfNoDynamoSupport
     @skipIfNoONEDNN
     @skipIfRocm
@@ -1269,6 +1289,26 @@ class TestPatternMatcher(TestPatternMatcherBase):
             check_autocast=torch.bfloat16 if int8_mixed_bf16 else torch.float,
             matcher_check_fn=matcher_check_fn,
         )
+
+        if not int8_mixed_bf16:
+            if torch._inductor.config.cpp_wrapper:
+                self._test_code_common(
+                    mod,
+                    (v,),
+                    [f"aoti_torch_{device}__qconv_pointwise_tensor"],
+                    [],
+                    check_quantization=True,
+                    num_include_ops=[2],
+                )
+            else:
+                self._test_code_common(
+                    mod,
+                    (v,),
+                    ["torch.ops.onednn.qconv_pointwise.tensor"],
+                    [],
+                    check_quantization=True,
+                    num_include_ops=[2],
+                )
 
     @skipIfNoDynamoSupport
     @skipIfNoONEDNN
@@ -1548,6 +1588,32 @@ class TestPatternMatcher(TestPatternMatcherBase):
                 check_autocast=torch.bfloat16 if int8_mixed_bf16 else torch.float,
             )
 
+            if not int8_mixed_bf16:
+                if torch._inductor.config.cpp_wrapper:
+                    self._test_code_common(
+                        mod,
+                        (v,),
+                        [
+                            f"aoti_torch_{device}__qconv_pointwise_tensor",
+                            f"aoti_torch_{device}__qconv2d_pointwise_binary_tensor",
+                        ],
+                        [],
+                        check_quantization=True,
+                        num_include_ops=[2, 2],
+                    )
+                else:
+                    self._test_code_common(
+                        mod,
+                        (v,),
+                        [
+                            "torch.ops.onednn.qconv_pointwise.tensor",
+                            "torch.ops.onednn.qconv2d_pointwise.binary_tensor",
+                        ],
+                        [],
+                        check_quantization=True,
+                        num_include_ops=[2, 2],
+                    )
+
     def _qconv2d_add_test_helper2(
         self, device="cpu", use_relu=False, int8_mixed_bf16=False
     ):
@@ -1644,6 +1710,26 @@ class TestPatternMatcher(TestPatternMatcherBase):
                 check_quantization=True,
                 check_autocast=torch.bfloat16 if int8_mixed_bf16 else torch.float,
             )
+
+            if not int8_mixed_bf16:
+                if torch._inductor.config.cpp_wrapper:
+                    self._test_code_common(
+                        mod,
+                        (x, x2, x3),
+                        [f"aoti_torch_{device}__qconv2d_pointwise_binary_tensor"],
+                        [],
+                        check_quantization=True,
+                        num_include_ops=[2],
+                    )
+                else:
+                    self._test_code_common(
+                        mod,
+                        (x, x2, x3),
+                        ["torch.ops.onednn.qconv2d_pointwise.binary_tensor"],
+                        [],
+                        check_quantization=True,
+                        num_include_ops=[2],
+                    )
 
     @skipIfNoDynamoSupport
     @skipIfNoONEDNN
