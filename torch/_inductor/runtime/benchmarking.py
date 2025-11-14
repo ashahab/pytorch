@@ -2,17 +2,20 @@ import functools
 import inspect
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from filelock import FileLock
 from functools import cached_property, wraps
 from itertools import chain
 from statistics import median
-from typing import Any, Concatenate, Optional, Union
+from typing import Any, Concatenate, Generator, Optional, Union
 from typing_extensions import ParamSpec, Self, TypeVar
 
 import torch
 import torch.utils._pytree as pytree
 from torch._dynamo.utils import counters, dynamo_timed
 from torch._inductor.config import use_experimental_benchmarker
+from torch._inductor.runtime.runtime_utils import default_cache_dir
+from torch._inductor.runtime.caching.locks import _acquire_flock_with_timeout
 
 
 logger = torch._logging.getArtifactLogger(__name__, "benchmarking")
@@ -31,17 +34,21 @@ T = TypeVar("T")
 # timeout, in seconds, when attempting to lock the gpu
 GPU_TIMEOUT: float = 60.0 * 60.0
 
+@contextmanager
+def _lock_gpu() -> Generator[None, None, None]:
+    device: torch.device = torch.device("cuda")
+    flock_name: str = f"{device.type}_{device.index or torch.cuda.current_device()}.lock"
+    flock: FileLock = FileLock(default_cache_dir() + f"/locks/{flock_name}")
+    with _acquire_flock_with_timeout(flock, timeout=GPU_TIMEOUT):
+        yield
+
 def lock_gpu(fn: Callable[P, R]) -> Callable[P, R]:
     @wraps(fn)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        from torch._inductor.runtime.runtime_utils import default_cache_dir
-        if "inferred_device" in kwargs:
-            inferred_device: torch.device = kwargs["inferred_device"]
-            del kwargs["inferred_device"]
-        else:
-            inferred_device = torch.device("cuda")
-        flock: FileLock = FileLock(default_cache_dir() + f"/locks/{inferred_device.type}_{inferred_device.index or torch.cuda.current_device()}.lock", timeout=GPU_TIMEOUT)
-        with flock:
+        from torch._inductor.virtualized import threadlocal
+        if getattr(threadlocal, "__torchinductor_gpu_lock_bypass", False):
+            return fn(*args, **kwargs)
+        with _lock_gpu():
             return fn(*args, **kwargs)
     return wrapper
 

@@ -73,7 +73,7 @@ from .exc import CUDACompileError
 from .fx_utils import count_flops_fx
 from .ir import ChoiceCaller, PrimitiveInfoType
 from .ops_handler import StoreMode
-from .runtime.benchmarking import benchmarker
+from .runtime.benchmarking import benchmarker, _lock_gpu
 from .runtime.hints import DeviceProperties
 from .runtime.triton_compat import HAS_WARP_SPEC
 from .runtime.triton_heuristics import FixedGrid
@@ -2930,9 +2930,20 @@ class AlgorithmSelectorCache(PersistentCache):
                     if not hasattr(c, "hint_override")
                     or c.hint_override == hint_override
                 ]
-                timings = do_autotuning(
-                    filtered_choices, precompile_fn, hint_override=hint_override
-                )
+                with _lock_gpu():
+                    setattr(threadlocal, "__torchinductor_gpu_lock_bypass", True)
+                    timings = self.do_autotuning(
+                        name,
+                        input_nodes,
+                        layout,
+                        input_gen_fns,
+                        inputs_key,
+                        filtered_choices,
+                        precompile_fn,
+                        hint_override=hint_override,
+                        best_config_future=best_config_future,
+                    )
+                    setattr(threadlocal, "__torchinductor_gpu_lock_bypass", False)
                 min_extern_choice = float("inf")
                 for choice, timing in timings.items():
                     if isinstance(choice, ExternKernelCaller):
@@ -2949,11 +2960,10 @@ class AlgorithmSelectorCache(PersistentCache):
 
                 return timings
             
-            num_workers = min(get_num_workers(), len(choices))
-            executor = ThreadPoolExecutor(max_workers=num_workers)
+            executor = ThreadPoolExecutor(max_workers=1)
             get_timings_future = executor.submit(get_timings, graph=getattr(threadlocal, "__torchinductor_graph"), debug=getattr(threadlocal, "__torchinductor_debug"))
 
-            def real_get_timings(hint_override: Optional[int] = None):
+            def async_get_timings(hint_override: Optional[int] = None):
                 if hint_override:
                     return get_timings(hint_override)
                 return get_timings_future.result()
@@ -2970,7 +2980,7 @@ class AlgorithmSelectorCache(PersistentCache):
                 torch._inductor.ir.MultiTemplateBuffer(
                     layout,
                     input_nodes,
-                    real_get_timings,
+                    async_get_timings,
                     choices,
                     allowed_prologue_inps,
                 )
