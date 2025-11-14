@@ -2980,13 +2980,13 @@ class AlgorithmSelectorCache(PersistentCache):
                     # call has priority and can bypass the paused event
                     this_has_priority.set()
                     # pause async autotuning so we can obtain priority
-                    self.async_autotuning_unpaused.set()
+                    self.async_autotuning_unpaused.clear()
                     if hint_override:
                         return get_timings(hint_override)
                     return get_timings_future.result()
                 finally:
                     # unpause async autotuning, so other threads can proceed
-                    self.async_autotuning_unpaused.clear()
+                    self.async_autotuning_unpaused.set()
                     # this get_timings no longer has priority
                     this_has_priority.clear()
 
