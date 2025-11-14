@@ -2666,6 +2666,7 @@ class AlgorithmSelectorCache(PersistentCache):
         self._register_default_preprocessing_fns()
 
         self.async_autotuning_unpaused: threading.Event = threading.Event()
+        self.async_autotuning_unpaused.set()
 
         # registers `self.cache_clear(...)` to be called when a fresh Inductor cache is requested
         clear_on_fresh_cache(self)
