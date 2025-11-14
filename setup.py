@@ -260,7 +260,7 @@ import subprocess
 import sysconfig
 import time
 from collections import defaultdict
-
+from pathlib import Path
 import setuptools.command.build_ext
 import setuptools.command.install
 import setuptools.command.sdist
@@ -272,6 +272,7 @@ from tools.setup_helpers.cmake import CMake
 from tools.setup_helpers.env import build_type, IS_DARWIN, IS_LINUX, IS_WINDOWS
 from tools.setup_helpers.generate_linker_script import gen_linker_script
 
+CWD = Path(__file__).absolute().parent
 
 def str2bool(value: str | None) -> bool:
     """Convert environment variables to boolean values."""
