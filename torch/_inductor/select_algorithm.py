@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import textwrap
+import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import as_completed, ThreadPoolExecutor
@@ -74,6 +75,7 @@ from .fx_utils import count_flops_fx
 from .ir import ChoiceCaller, PrimitiveInfoType
 from .ops_handler import StoreMode
 from .runtime.benchmarking import benchmarker, _lock_gpu
+from .runtime.caching import FileLockTimeoutError
 from .runtime.hints import DeviceProperties
 from .runtime.triton_compat import HAS_WARP_SPEC
 from .runtime.triton_heuristics import FixedGrid
@@ -2663,6 +2665,8 @@ class AlgorithmSelectorCache(PersistentCache):
 
         self._register_default_preprocessing_fns()
 
+        self.async_autotuning_unpaused: threading.Event = threading.Event()
+
         # registers `self.cache_clear(...)` to be called when a fresh Inductor cache is requested
         clear_on_fresh_cache(self)
 
@@ -2917,6 +2921,7 @@ class AlgorithmSelectorCache(PersistentCache):
         )
 
         if return_multi_template and (config.max_autotune or config.max_autotune_gemm):
+            this_has_priority: threading.Event = threading.Event()
 
             from torch._inductor.virtualized import threadlocal
             def get_timings(hint_override: Optional[int] = None, graph=None, debug=None):
@@ -2930,20 +2935,23 @@ class AlgorithmSelectorCache(PersistentCache):
                     if not hasattr(c, "hint_override")
                     or c.hint_override == hint_override
                 ]
-                with _lock_gpu():
-                    setattr(threadlocal, "__torchinductor_gpu_lock_bypass", True)
-                    timings = self.do_autotuning(
-                        name,
-                        input_nodes,
-                        layout,
-                        input_gen_fns,
-                        inputs_key,
-                        filtered_choices,
-                        precompile_fn,
-                        hint_override=hint_override,
-                        best_config_future=best_config_future,
-                    )
-                    setattr(threadlocal, "__torchinductor_gpu_lock_bypass", False)
+                while True:
+                    if (not this_has_priority.is_set()) and (not self.async_autotuning_unpaused.is_set()):
+                        # async autotuning is paused, let's cycle back in a bit
+                        time.sleep(0.5)
+                        continue
+                    try:
+                        with _lock_gpu(timeout=0.5):
+                            setattr(threadlocal, "__torchinductor_gpu_lock_bypass", True)
+                            timings = do_autotuning(
+                                filtered_choices, precompile_fn, hint_override=hint_override
+                            )
+                            setattr(threadlocal, "__torchinductor_gpu_lock_bypass", False)
+                        break
+                    except FileLockTimeoutError:
+                        # we couldn't acquire the lock in time, we'll try again later
+                        time.sleep(0.5)
+                        continue
                 min_extern_choice = float("inf")
                 for choice, timing in timings.items():
                     if isinstance(choice, ExternKernelCaller):
@@ -2964,9 +2972,22 @@ class AlgorithmSelectorCache(PersistentCache):
             get_timings_future = executor.submit(get_timings, graph=getattr(threadlocal, "__torchinductor_graph"), debug=getattr(threadlocal, "__torchinductor_debug"))
 
             def async_get_timings(hint_override: Optional[int] = None):
-                if hint_override:
-                    return get_timings(hint_override)
-                return get_timings_future.result()
+                try:
+                    # wait indefinitely, until async autotuning is unpaused
+                    self.async_autotuning_unpaused.wait()
+                    # signal that this async (or non-async) get_timings
+                    # call has priority and can bypass the paused event
+                    this_has_priority.set()
+                    # pause async autotuning so we can obtain priority
+                    self.async_autotuning_unpaused.set()
+                    if hint_override:
+                        return get_timings(hint_override)
+                    return get_timings_future.result()
+                finally:
+                    # unpause async autotuning, so other threads can proceed
+                    self.async_autotuning_unpaused.clear()
+                    # this get_timings no longer has priority
+                    this_has_priority.clear()
 
             # We take the union of allowed prologue inputs from all choices,
             # and, within benchmark fusion, don't allow prologue fusion for

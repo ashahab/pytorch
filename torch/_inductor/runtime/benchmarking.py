@@ -35,11 +35,11 @@ T = TypeVar("T")
 GPU_TIMEOUT: float = 60.0 * 60.0
 
 @contextmanager
-def _lock_gpu() -> Generator[None, None, None]:
+def _lock_gpu(timeout: float = GPU_TIMEOUT) -> Generator[None, None, None]:
     device: torch.device = torch.device("cuda")
     flock_name: str = f"{device.type}_{device.index or torch.cuda.current_device()}.lock"
     flock: FileLock = FileLock(default_cache_dir() + f"/locks/{flock_name}")
-    with _acquire_flock_with_timeout(flock, timeout=GPU_TIMEOUT):
+    with _acquire_flock_with_timeout(flock, timeout=timeout):
         yield
 
 def lock_gpu(fn: Callable[P, R]) -> Callable[P, R]:
