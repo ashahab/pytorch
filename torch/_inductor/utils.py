@@ -47,6 +47,7 @@ from typing_extensions import (
     TypeGuard,
 )
 from unittest import mock
+from pathlib import Path
 
 import sympy
 
@@ -1564,6 +1565,13 @@ def use_triton_tma_template(*matrices: IRNode) -> bool:
         and has_triton_tma_device()
         and all(_is_tma_compatible(m) for m in matrices)
     )
+
+
+# Make sure to also include your jinja templates within torch_package_data in setup.py, or this function won't be able to find them
+def load_template(name: str, template_dir: Path) -> str:
+    """Load a template file and return its content."""
+    with open(template_dir / f"{name}.py.jinja") as f:
+        return f.read()
 
 
 def use_triton_blackwell_tma_template(
