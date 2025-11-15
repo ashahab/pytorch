@@ -533,24 +533,24 @@ def mirror_inductor_external_kernels() -> None:
     """
     Copy external kernels into Inductor so they are importable.
     """
+    # (new_path, orig_path)
     paths = [
         (
-            CWD / "torch/_inductor/kernel/vendored_templates/cutedsl_grouped_gemm.py",
-            CWD
-            / "third_party/cutlass/examples/python/CuTeDSL/blackwell/grouped_gemm.py",
+            "torch/_inductor/kernel/vendored_templates/cutedsl_grouped_gemm.py",
+            "third_party/cutlass/examples/python/CuTeDSL/blackwell/grouped_gemm.py",
         ),
     ]
     for new_path, orig_path in paths:
         # Create the dirs involved in new_path if they don't exist
-        if not new_path.exists():
-            new_path.parent.mkdir(parents=True, exist_ok=True)
+        if not os.path.exists(new_path):
+            os.makedirs(os.path.dirname(new_path), exist_ok=True)
 
         # Copy the files from the orig location to the new location
-        if orig_path.is_file():
+        if os.path.isfile(orig_path):
             shutil.copyfile(orig_path, new_path)
             continue
-        if orig_path.is_dir():
-            if new_path.exists():
+        if os.path.isdir(orig_path):
+            if os.path.exists(new_path):
                 # copytree fails if the tree exists already, so remove it.
                 shutil.rmtree(new_path)
             shutil.copytree(orig_path, new_path)
