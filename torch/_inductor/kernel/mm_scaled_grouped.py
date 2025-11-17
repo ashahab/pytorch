@@ -7,7 +7,7 @@ import torch
 from torch._dynamo.utils import counters
 from torch._inductor.codegen.cutedsl.cutedsl_template import CuteDSLTemplate
 from torch._inductor.runtime.triton_compat import tl
-from torch._inductor.template_heuristics.cutedsl import get_groupgemm_configs
+from torch._inductor.template_heuristics_cutedsl.cutedsl import get_groupgemm_configs
 from torch._inductor.virtualized import V
 from torch.utils._triton import has_triton
 
