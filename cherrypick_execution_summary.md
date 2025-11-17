@@ -312,6 +312,7 @@ if not os.path.exists(new_path):
 ## Final Commit History
 
 ```
+9acee4f7984 - Rename template_heuristics/ to template_heuristics_cutedsl/
 e544d37456b - Add missing __init__.py to template_heuristics package (amended)
 f0be1948f34 - Add missing CuteDSL support classes to ir.py and autotune_process.py
 5ef8bd99946 - Add missing cutedsl codegen module from main branch
@@ -520,14 +521,67 @@ from . import cutedsl
 
 ---
 
+## Post-Cherry-Pick Fix #6: template_heuristics Naming Conflict
+
+### Issue: Module Name Collision
+
+**Error:** `ImportError: cannot import name 'BaseConfigHeuristic' from 'torch._inductor.template_heuristics'`
+
+**Root Cause:**
+The v2.8.0 branch has `torch/_inductor/template_heuristics.py` as a **file** containing important classes like `BaseConfigHeuristic`, `GemmConfig`, etc. We created `torch/_inductor/template_heuristics/` as a **directory** with the same name.
+
+Python's import system prioritizes the `.py` file over the directory when both exist with the same name. This caused:
+- Imports like `from torch._inductor.template_heuristics import BaseConfigHeuristic` worked (from the file)
+- But imports like `from torch._inductor.template_heuristics.cutedsl import ...` failed (directory not recognized)
+
+**Investigation Process:**
+1. Error mentioned `BaseConfigHeuristic` not found in `template_heuristics`
+2. Searched for `BaseConfigHeuristic` - found in `template_heuristics.py` (file)
+3. Discovered both file and directory exist with same name
+4. Checked main branch - only has directory (file was refactored into modules)
+5. In v2.8.0, the refactoring hasn't happened yet - file still exists
+
+**Fix Applied:**
+Commit: `9acee4f7984`
+
+Renamed the directory to avoid the naming conflict:
+- `torch/_inductor/template_heuristics/` → `torch/_inductor/template_heuristics_cutedsl/`
+- Updated import in `mm_scaled_grouped.py`:
+  ```python
+  # Before:
+  from torch._inductor.template_heuristics.cutedsl import get_groupgemm_configs
+
+  # After:
+  from torch._inductor.template_heuristics_cutedsl.cutedsl import get_groupgemm_configs
+  ```
+
+**Changes Summary:**
+- Renamed directory to `template_heuristics_cutedsl/`
+- Updated 1 import statement in `mm_scaled_grouped.py`
+- Preserves original `template_heuristics.py` file with all its classes
+- Avoids Python module name resolution conflicts
+
+**Why This Works:**
+- v2.8.0 has single-file `template_heuristics.py` with all heuristic classes
+- Main branch refactored this into `template_heuristics/` directory with multiple modules
+- Our cherry-pick only needs the cutedsl heuristic module
+- By renaming to `template_heuristics_cutedsl/`, we avoid the conflict
+- The original file remains intact for other code that depends on it
+
+**Status:** ✅ Fixed and committed
+**Validation:** ✅ Python syntax valid
+
+---
+
 ## Updated Next Steps
 
-All five post-cherry-pick issues have been resolved:
+All six post-cherry-pick issues have been resolved:
 1. ✅ `CWD` NameError - Fixed by converting to os.path methods
 2. ✅ `load_template` ImportError - Fixed by adding missing function
 3. ✅ `cutedsl` ModuleNotFoundError - Fixed by adding entire module
 4. ✅ Missing support classes - Fixed by adding CuteDSLTemplateBuffer and CuteDSLBenchmarkRequest
-5. ✅ Package initialization - Fixed by adding template_heuristics __init__.py
+5. ✅ Package initialization - Fixed by adding minimal __init__.py
+6. ✅ Naming conflict - Fixed by renaming directory to template_heuristics_cutedsl
 
 The cherry-pick is now ready for compilation testing.
 
