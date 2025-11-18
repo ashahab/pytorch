@@ -72,7 +72,7 @@ def test_simple_grouped_mm():
         # Offsets indicating where each group starts in mat_a
         # Group 0: rows 0-15 (16 rows)
         # Group 1: rows 16-47 (32 rows)
-        offs = torch.tensor([16, 48], dtype=torch.int64, device=device)
+        offs = torch.tensor([16, 48], dtype=torch.int32, device=device)
 
         print(f"Input A shape: {mat_a.shape} (concatenated, {mat_a.dtype})")
         print(f"Input B shape: {mat_b.shape} (grouped, {mat_b.dtype})")
@@ -145,7 +145,7 @@ def test_larger_grouped_mm():
         total_rows = 128 + 256 + 64
         mat_a = torch.randn(total_rows, 64, dtype=dtype, device=device)
         mat_b = torch.randn(3, 64, 32, dtype=dtype, device=device)
-        offs = torch.tensor([128, 384, 448], dtype=torch.int64, device=device)
+        offs = torch.tensor([128, 384, 448], dtype=torch.int32, device=device)
 
         print(f"Input A shape: {mat_a.shape}")
         print(f"Input B shape: {mat_b.shape}")
@@ -202,7 +202,7 @@ def test_with_torch_compile():
         # Create inputs with proper alignment (multiples of 16 for bfloat16)
         mat_a = torch.randn(48, 16, dtype=dtype, device=device)
         mat_b = torch.randn(2, 16, 16, dtype=dtype, device=device)
-        offs = torch.tensor([16, 48], dtype=torch.int64, device=device)
+        offs = torch.tensor([16, 48], dtype=torch.int32, device=device)
 
         print("Running compiled function...")
         result = compiled_fn(mat_a, mat_b, offs)
