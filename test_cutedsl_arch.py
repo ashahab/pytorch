@@ -107,11 +107,10 @@ def test_cutlass_hardware_info():
         import cutlass
         import cutlass.utils
 
-        hw = cutlass.utils.HardwareInfo()
-        major = hw.device_properties.major
-        minor = hw.device_properties.minor
-        name = hw.device_properties.name
-        sm_count = hw.device_properties.multiProcessorCount
+        # Get GPU info from torch.cuda (HardwareInfo API varies by cutlass version)
+        major, minor = torch.cuda.get_device_capability()
+        name = torch.cuda.get_device_name()
+        sm_count = torch.cuda.get_device_properties(0).multi_processor_count
 
         print(f"✓ GPU: {name}")
         print(f"✓ Compute Capability: {major}.{minor}")
