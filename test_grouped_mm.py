@@ -55,22 +55,24 @@ def test_simple_grouped_mm():
 
     try:
         # Create simple test inputs
-        # Group 1: 4x8 @ 8x4 = 4x4
-        # Group 2: 8x8 @ 8x4 = 8x4
+        # For bfloat16 (2 bytes per element), contiguous dim must be at least
+        # 16 bytes = 8 elements. Use multiples of 16 for better alignment.
+        # Group 1: 16x16 @ 16x16 = 16x16
+        # Group 2: 32x16 @ 16x16 = 32x16
 
         device = 'cuda'
         dtype = torch.bfloat16
 
-        # Concatenated A matrix [12, 8] = [4, 8] + [8, 8]
-        mat_a = torch.randn(12, 8, dtype=dtype, device=device)
+        # Concatenated A matrix [48, 16] = [16, 16] + [32, 16]
+        mat_a = torch.randn(48, 16, dtype=dtype, device=device)
 
-        # Concatenated B matrix [2, 8, 4] for 2 groups
-        mat_b = torch.randn(2, 8, 4, dtype=dtype, device=device)
+        # Concatenated B matrix [2, 16, 16] for 2 groups
+        mat_b = torch.randn(2, 16, 16, dtype=dtype, device=device)
 
         # Offsets indicating where each group starts in mat_a
-        # Group 0: rows 0-3 (4 rows)
-        # Group 1: rows 4-11 (8 rows)
-        offs = torch.tensor([4, 12], dtype=torch.int64, device=device)
+        # Group 0: rows 0-15 (16 rows)
+        # Group 1: rows 16-47 (32 rows)
+        offs = torch.tensor([16, 48], dtype=torch.int64, device=device)
 
         print(f"Input A shape: {mat_a.shape} (concatenated, {mat_a.dtype})")
         print(f"Input B shape: {mat_b.shape} (grouped, {mat_b.dtype})")
@@ -84,7 +86,7 @@ def test_simple_grouped_mm():
         print(f"✓ torch._grouped_mm executed successfully!")
 
         # Verify output shape
-        expected_shape = (12, 4)  # 4+8 rows, 4 cols
+        expected_shape = (48, 16)  # 16+32 rows, 16 cols
         if result.shape == expected_shape:
             print(f"✓ Output shape matches expected: {expected_shape}")
         else:
@@ -197,10 +199,10 @@ def test_with_torch_compile():
         print("Compiling function with torch.compile...")
         compiled_fn = torch.compile(grouped_mm_fn, backend="inductor")
 
-        # Create inputs
-        mat_a = torch.randn(12, 8, dtype=dtype, device=device)
-        mat_b = torch.randn(2, 8, 4, dtype=dtype, device=device)
-        offs = torch.tensor([4, 12], dtype=torch.int64, device=device)
+        # Create inputs with proper alignment (multiples of 16 for bfloat16)
+        mat_a = torch.randn(48, 16, dtype=dtype, device=device)
+        mat_b = torch.randn(2, 16, 16, dtype=dtype, device=device)
+        offs = torch.tensor([16, 48], dtype=torch.int64, device=device)
 
         print("Running compiled function...")
         result = compiled_fn(mat_a, mat_b, offs)
