@@ -1059,7 +1059,7 @@ static bool _scaled_mm_allowed_device(bool sm90_only=false) {
 #else
     auto dprops = at::cuda::getCurrentDeviceProperties();
     if (sm90_only) {
-      return dprops->major == 9;
+      return dprops->major >= 9;
     } else {
       return dprops->major >= 9 || (dprops->major == 8 && dprops->minor == 9);
     }
