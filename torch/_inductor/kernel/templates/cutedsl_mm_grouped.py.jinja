@@ -1,11 +1,24 @@
 import functools
+import os
 from torch._inductor.runtime.runtime_utils import ceildiv
 from cutlass.utils import TensorMapUpdateMode
 {{gen_defines()}}
+
+# ---- Configure CUTLASS NVCC architecture for Blackwell ----
+# nvidia-cutlass uses the CUTLASS_NVCC_ARCHS environment variable to determine
+# which GPU architectures to compile for. We need to set this to ensure the
+# compiled kernels work on both SM 90 (Blackwell 9.0) and SM 100 (Blackwell 10.0+).
+if "CUTLASS_NVCC_ARCHS" not in os.environ:
+    # Set default to support both Blackwell 9.0 and 10.0+
+    # Format: "arch-real" means compile native code for that architecture
+    os.environ["CUTLASS_NVCC_ARCHS"] = "90a-real,100a-real"
+
 # ---- Import GroupedGemm implementation, copied on PyTorch build from Cutlass repository: cutlass/examples/python/CuTeDSL/blackwell/grouped_gemm.py ----
 from torch._inductor.kernel.vendored_templates.cutedsl_grouped_gemm import (
     GroupedGemmKernel,
 )
+import cutlass
+import cutlass.cute as cute
 
 
 # Note about caching:

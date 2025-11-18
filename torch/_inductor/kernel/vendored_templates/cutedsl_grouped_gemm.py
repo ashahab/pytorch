@@ -28,8 +28,19 @@
 
 import argparse
 import functools
+import os
 from typing import List, Type, Union
 from inspect import isclass
+
+# ---- Configure CUTLASS NVCC architecture BEFORE importing cutlass ----
+# nvidia-cutlass uses the CUTLASS_NVCC_ARCHS environment variable to determine
+# which GPU architectures to compile for. This MUST be set before importing
+# cutlass to ensure the JIT compiler targets the correct architectures.
+if "CUTLASS_NVCC_ARCHS" not in os.environ:
+    # Support both Blackwell 9.0 (SM 90a) and Blackwell 10.0+ (SM 100a)
+    # Format: "arch-real" means compile native code for that architecture
+    # The 'a' suffix enables advanced/extended features of these architectures
+    os.environ["CUTLASS_NVCC_ARCHS"] = "90a-real,100a-real"
 
 import torch
 import cuda.bindings.driver as cuda
