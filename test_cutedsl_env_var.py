@@ -59,6 +59,10 @@ def main():
 
     files_to_check = [
         (
+            pytorch_root / "torch/_inductor/codegen/cutedsl/__init__.py",
+            "CuteDSL Module __init__.py (CRITICAL - earliest import point)"
+        ),
+        (
             pytorch_root / "torch/_inductor/codegen/cutedsl/_cutedsl_utils.py",
             "CuteDSL Utils Module"
         ),
