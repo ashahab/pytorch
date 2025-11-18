@@ -1,5 +1,11 @@
 # mypy: disable-error-code=import-not-found
 # pyrefly: ignore [import-error]
+import os
+
+# Configure CUTLASS NVCC architecture BEFORE importing cutlass
+if "CUTLASS_NVCC_ARCHS" not in os.environ:
+    os.environ["CUTLASS_NVCC_ARCHS"] = "90a-real,100a-real"
+
 import cutlass.cute as cute
 
 

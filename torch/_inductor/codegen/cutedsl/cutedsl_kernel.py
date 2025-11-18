@@ -122,7 +122,11 @@ class CuteDSLTemplateKernel(Kernel):
         imports = IndentedBuffer()
         imports.splice(
             """
+            import os
             import torch
+            # Configure CUTLASS NVCC architecture BEFORE importing cutlass
+            if "CUTLASS_NVCC_ARCHS" not in os.environ:
+                os.environ["CUTLASS_NVCC_ARCHS"] = "90a-real,100a-real"
             import cutlass
             import cutlass.cute as cute
             from cutlass.cute.runtime import from_dlpack
