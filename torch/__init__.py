@@ -34,6 +34,11 @@ from typing import (
 )
 from typing_extensions import ParamSpec as _ParamSpec
 
+# Configure CUTLASS architecture for Blackwell GPUs BEFORE any modules are imported
+# This must be set before cutlass is imported anywhere in the codebase
+# to ensure CuteDSL JIT compilation has the correct NVRTC flags
+if "CUTLASS_NVCC_ARCHS" not in os.environ:
+    os.environ["CUTLASS_NVCC_ARCHS"] = "90a-real,100a-real"
 
 if TYPE_CHECKING:
     from .types import Device, IntLikeType
