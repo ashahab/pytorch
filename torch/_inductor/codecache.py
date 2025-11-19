@@ -207,7 +207,8 @@ class CacheBase:
             # Use triton_key instead of triton.__version__ as the version
             # is not updated with each code change
             triton_version = triton_key()
-        except ModuleNotFoundError:
+        except (ModuleNotFoundError, ImportError):
+            # Fallback for older Triton versions that don't have triton_key
             triton_version = None
 
         try:
