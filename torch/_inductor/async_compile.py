@@ -499,6 +499,13 @@ class AsyncCompile:
         kernel_code_log.info("CuteDSL Kernel:\n%s", source_code)
 
         def task():
+            # CRITICAL: Set CUTLASS_NVCC_ARCHS before loading the module
+            # This ensures the environment variable is set before @cute.kernel decorators
+            # are applied during module execution
+            import os
+            if "CUTLASS_NVCC_ARCHS" not in os.environ:
+                os.environ["CUTLASS_NVCC_ARCHS"] = "90a-real,100a-real"
+
             key, path = torch._inductor.codecache.PyCodeCache.write(source_code)
             mod = torch._inductor.codecache.PyCodeCache.load_by_key_path(key, path)
 
