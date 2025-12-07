@@ -2520,6 +2520,340 @@ class TestGroupedMMCUDAGraph(TestCase):
             del g
             torch.cuda.empty_cache()
 
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_stress_replay(self):
+        """
+        Stress test with 100+ replays to simulate real inference workloads.
+
+        In production inference (e.g., vLLM), CUDA graphs are replayed thousands
+        of times. This test verifies memory stability over many replays.
+        """
+        device = "cuda"
+        dtype = torch.bfloat16
+        n_groups, m, n, k = 4, 32, 64, 128
+
+        a = torch.randn(n_groups, m, k, device=device, dtype=dtype)
+        b = torch.randn(n_groups, n, k, device=device, dtype=dtype)
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            _ = torch._grouped_mm(a, b.transpose(-2, -1))
+
+            g.capture_begin()
+            out = torch._grouped_mm(a, b.transpose(-2, -1))
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Stress test: 100 replays
+        for i in range(100):
+            g.replay()
+            # Verify periodically to catch memory corruption
+            if i % 25 == 0:
+                expected = torch._grouped_mm(a, b.transpose(-2, -1))
+                self.assertEqual(out, expected, msg=f"Mismatch on replay {i}")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_input_update(self):
+        """
+        Test CUDA graph replay with updated input data.
+
+        CUDA graphs use static memory addresses but allow input data updates.
+        This tests the pattern used in inference where inputs change but
+        the computation graph stays the same.
+        """
+        device = "cuda"
+        dtype = torch.bfloat16
+        n_groups, m, n, k = 4, 16, 32, 64
+
+        # Create static input buffers for graph
+        a_static = torch.randn(n_groups, m, k, device=device, dtype=dtype)
+        b_static = torch.randn(n_groups, n, k, device=device, dtype=dtype)
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            _ = torch._grouped_mm(a_static, b_static.transpose(-2, -1))
+
+            g.capture_begin()
+            out = torch._grouped_mm(a_static, b_static.transpose(-2, -1))
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Replay with different input data each time
+        for i in range(10):
+            # Update input tensors in-place (this is the pattern used in inference)
+            a_static.copy_(torch.randn(n_groups, m, k, device=device, dtype=dtype))
+            b_static.copy_(torch.randn(n_groups, n, k, device=device, dtype=dtype))
+
+            g.replay()
+
+            # Verify output matches expected for new inputs
+            expected = torch._grouped_mm(a_static, b_static.transpose(-2, -1))
+            self.assertEqual(out, expected, msg=f"Mismatch on replay {i} with updated inputs")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_memory_pressure(self):
+        """
+        Test CUDA graph replay under memory pressure.
+
+        This simulates the multi-node scenario where independent memory pools
+        cause rapid allocation/deallocation, increasing chance of address reuse.
+        """
+        device = "cuda"
+        dtype = torch.bfloat16
+        n_groups, m, n, k = 4, 32, 64, 128
+
+        a = torch.randn(n_groups, m, k, device=device, dtype=dtype)
+        b = torch.randn(n_groups, n, k, device=device, dtype=dtype)
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            _ = torch._grouped_mm(a, b.transpose(-2, -1))
+
+            g.capture_begin()
+            out = torch._grouped_mm(a, b.transpose(-2, -1))
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Replay with memory pressure - allocate and free tensors between replays
+        for i in range(20):
+            # Create memory pressure by allocating and freeing large tensors
+            pressure_tensors = [
+                torch.randn(1024, 1024, device=device, dtype=dtype)
+                for _ in range(5)
+            ]
+            del pressure_tensors
+            torch.cuda.empty_cache()
+
+            # Replay the graph - this should still work with tensor-based allocation
+            g.replay()
+
+            # Verify correctness
+            if i % 5 == 0:
+                expected = torch._grouped_mm(a, b.transpose(-2, -1))
+                self.assertEqual(out, expected, msg=f"Mismatch on replay {i} under memory pressure")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_interleaved_replay(self):
+        """
+        Test interleaved CUDA graph replays with non-graph operations.
+
+        This simulates real inference where CUDA graphs are replayed
+        alongside other operations (like NCCL collectives in distributed).
+        """
+        device = "cuda"
+        dtype = torch.bfloat16
+        n_groups, m, n, k = 4, 16, 32, 64
+
+        a = torch.randn(n_groups, m, k, device=device, dtype=dtype)
+        b = torch.randn(n_groups, n, k, device=device, dtype=dtype)
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            _ = torch._grouped_mm(a, b.transpose(-2, -1))
+
+            g.capture_begin()
+            out = torch._grouped_mm(a, b.transpose(-2, -1))
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Interleave graph replays with non-graph operations
+        for i in range(15):
+            # Non-graph operations (simulating NCCL all-reduce, etc.)
+            temp = torch.randn(256, 256, device=device, dtype=dtype)
+            temp = temp @ temp.t()
+            torch.cuda.synchronize()
+
+            # Graph replay
+            g.replay()
+
+            # More non-graph operations
+            temp2 = torch.randn(128, 128, device=device, dtype=dtype)
+            temp2 = torch.nn.functional.relu(temp2)
+            torch.cuda.synchronize()
+
+            # Verify correctness
+            if i % 5 == 0:
+                expected = torch._grouped_mm(a, b.transpose(-2, -1))
+                self.assertEqual(out, expected, msg=f"Mismatch on interleaved replay {i}")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_FP8, f8_msg)
+    def test_scaled_grouped_mm_cuda_graph_basic(self):
+        """
+        Test CUDA graph compatibility with torch._scaled_grouped_mm (FP8).
+
+        The scaled variant has the same memory allocation pattern as grouped_mm
+        and should also work correctly with CUDA graphs after the fix.
+        """
+        device = "cuda"
+        fp8_dtype = e4m3_type
+        n_groups, m, n, k = 4, 16, 32, 64
+
+        # Create FP8 inputs
+        a = torch.randn(n_groups, m, k, device=device, dtype=torch.bfloat16)
+        b = torch.randn(n_groups, n, k, device=device, dtype=torch.bfloat16)
+
+        # Convert to FP8
+        a_fp8 = a.to(fp8_dtype)
+        b_fp8 = b.to(fp8_dtype)
+
+        # Create scales (rowwise)
+        scale_a = torch.ones(n_groups, m, device=device, dtype=torch.float32)
+        scale_b = torch.ones(n_groups, n, device=device, dtype=torch.float32)
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            # Warmup
+            _ = torch._scaled_grouped_mm(
+                a_fp8, b_fp8.transpose(-2, -1),
+                scale_a, scale_b,
+                out_dtype=torch.bfloat16,
+                use_fast_accum=True
+            )
+
+            g.capture_begin()
+            out = torch._scaled_grouped_mm(
+                a_fp8, b_fp8.transpose(-2, -1),
+                scale_a, scale_b,
+                out_dtype=torch.bfloat16,
+                use_fast_accum=True
+            )
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Replay multiple times
+        for i in range(10):
+            g.replay()
+            expected = torch._scaled_grouped_mm(
+                a_fp8, b_fp8.transpose(-2, -1),
+                scale_a, scale_b,
+                out_dtype=torch.bfloat16,
+                use_fast_accum=True
+            )
+            self.assertEqual(out, expected, msg=f"Mismatch on scaled_grouped_mm replay {i}")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_FP8, f8_msg)
+    def test_scaled_grouped_mm_cuda_graph_stress(self):
+        """
+        Stress test scaled_grouped_mm with many CUDA graph replays.
+        """
+        device = "cuda"
+        fp8_dtype = e4m3_type
+        n_groups, m, n, k = 4, 32, 64, 128
+
+        a_fp8 = torch.randn(n_groups, m, k, device=device, dtype=torch.bfloat16).to(fp8_dtype)
+        b_fp8 = torch.randn(n_groups, n, k, device=device, dtype=torch.bfloat16).to(fp8_dtype)
+        scale_a = torch.ones(n_groups, m, device=device, dtype=torch.float32)
+        scale_b = torch.ones(n_groups, n, device=device, dtype=torch.float32)
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            _ = torch._scaled_grouped_mm(
+                a_fp8, b_fp8.transpose(-2, -1),
+                scale_a, scale_b,
+                out_dtype=torch.bfloat16,
+                use_fast_accum=True
+            )
+
+            g.capture_begin()
+            out = torch._scaled_grouped_mm(
+                a_fp8, b_fp8.transpose(-2, -1),
+                scale_a, scale_b,
+                out_dtype=torch.bfloat16,
+                use_fast_accum=True
+            )
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Stress test: 50 replays
+        for i in range(50):
+            g.replay()
+            if i % 10 == 0:
+                expected = torch._scaled_grouped_mm(
+                    a_fp8, b_fp8.transpose(-2, -1),
+                    scale_a, scale_b,
+                    out_dtype=torch.bfloat16,
+                    use_fast_accum=True
+                )
+                self.assertEqual(out, expected, msg=f"Mismatch on scaled_grouped_mm stress replay {i}")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_multiple_graphs(self):
+        """
+        Test multiple CUDA graphs with grouped_mm captured and replayed concurrently.
+
+        This simulates scenarios where multiple model components use CUDA graphs.
+        """
+        device = "cuda"
+        dtype = torch.bfloat16
+
+        # Create multiple graphs with different sizes
+        graphs = []
+        outputs = []
+        inputs_a = []
+        inputs_b = []
+
+        for n_groups in [2, 4, 8]:
+            m, n, k = 16, 32, 64
+            a = torch.randn(n_groups, m, k, device=device, dtype=dtype)
+            b = torch.randn(n_groups, n, k, device=device, dtype=dtype)
+            inputs_a.append(a)
+            inputs_b.append(b)
+
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+
+            with torch.cuda.stream(s):
+                g = torch.cuda.CUDAGraph()
+                _ = torch._grouped_mm(a, b.transpose(-2, -1))
+
+                g.capture_begin()
+                out = torch._grouped_mm(a, b.transpose(-2, -1))
+                g.capture_end()
+
+            torch.cuda.current_stream().wait_stream(s)
+            graphs.append(g)
+            outputs.append(out)
+
+        # Replay all graphs in round-robin fashion
+        for i in range(10):
+            for j, (g, out, a, b) in enumerate(zip(graphs, outputs, inputs_a, inputs_b)):
+                g.replay()
+                if i % 3 == 0:
+                    expected = torch._grouped_mm(a, b.transpose(-2, -1))
+                    self.assertEqual(out, expected, msg=f"Mismatch on graph {j} replay {i}")
+
 
 @unittest.skipIf(TEST_WITH_ROCM, "ROCm doesn't support CUTLASS")
 @unittest.skipIf(IS_WINDOWS, "Windows doesn't support CUTLASS extensions")
