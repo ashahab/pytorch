@@ -211,9 +211,16 @@ void bf16bf16_grouped_gemm_impl_sm90_sm100(
   int64_t input_args_size = aligned_group_count * 3 * sizeof(void*) +
       problem_shape_size + stride_size;
 
-  auto& allocator = *c10::cuda::CUDACachingAllocator::get();
-  auto input_buf = allocator.allocate(input_args_size);
-  void* buf_ptr = input_buf.get();
+  // Use tensor-based allocation for CUDA graph compatibility.
+  // When a CUDA graph is captured, tensor allocations go into the graph's
+  // private memory pool and remain valid during replay. This avoids the
+  // illegal memory access issues that occur with raw allocator.allocate()
+  // which returns memory that may be released before graph replay.
+  // See: https://github.com/pytorch/pytorch/issues/XXXXX
+  auto input_args_tensor = mat_a.new_empty(
+      {static_cast<int64_t>(input_args_size)},
+      at::TensorOptions().dtype(at::kByte));
+  void* buf_ptr = input_args_tensor.data_ptr();
   DtypeA** inputA_ptrs = reinterpret_cast<DtypeA**>(buf_ptr);
   DtypeB** inputB_ptrs =
       reinterpret_cast<DtypeB**>(inputA_ptrs + aligned_group_count);
@@ -299,13 +306,17 @@ void bf16bf16_grouped_gemm_impl_sm90_sm100(
   arguments.hw_info.sm_count = sm_count;
 
   size_t workspace_size = Gemm::get_workspace_size(arguments);
-  auto workspace = allocator.allocate(workspace_size);
+  // Use tensor-based workspace allocation for CUDA graph compatibility.
+  // Same rationale as input_args_tensor above.
+  auto workspace_tensor = mat_a.new_empty(
+      {static_cast<int64_t>(workspace_size > 0 ? workspace_size : 1)},
+      at::TensorOptions().dtype(at::kByte));
   Gemm gemm;
   TORCH_CHECK(
       gemm.can_implement(arguments) == cutlass::Status::kSuccess,
       "cutlass cannot implement");
   TORCH_CHECK(
-      gemm.initialize(arguments, workspace.get()) == cutlass::Status::kSuccess,
+      gemm.initialize(arguments, workspace_tensor.data_ptr()) == cutlass::Status::kSuccess,
       "cutlass cannot initialize");
   auto status = gemm(at::cuda::getCurrentCUDAStream());
   TORCH_CHECK(
