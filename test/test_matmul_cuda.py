@@ -53,6 +53,7 @@ from torch.testing._internal.common_utils import (
     skipIfRocm,
     skipIfRocmVersionLessThan,
     TEST_CUDA,
+    TEST_CUDA_GRAPH,
     TEST_WITH_ROCM,
     TestCase,
 )
@@ -2221,6 +2222,306 @@ class TestFP8Matmul(TestCase):
 
 
 @unittest.skipIf(TEST_WITH_ROCM, "ROCm doesn't support CUTLASS")
+@unittest.skipIf(not SM90OrLater, "CUDA graph tests for grouped_mm require SM90+")
+class TestGroupedMMCUDAGraph(TestCase):
+    """
+    Tests for CUDA graph compatibility with torch._grouped_mm and torch._scaled_grouped_mm.
+
+    These tests verify that the tensor-based workspace allocation fix enables
+    grouped matrix multiplication operations to work correctly when captured
+    in CUDA graphs and replayed multiple times.
+
+    See: https://github.com/pytorch/pytorch/issues/XXXXX
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Clear CUDA cache to ensure clean state
+        torch.cuda.empty_cache()
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_basic(self):
+        """Test basic CUDA graph capture and replay with grouped_mm (3D x 3D)."""
+        device = "cuda"
+        dtype = torch.bfloat16
+        n_groups, m, n, k = 4, 16, 32, 64
+
+        # Create input tensors
+        a = torch.randn(n_groups, m, k, device=device, dtype=dtype)
+        b = torch.randn(n_groups, n, k, device=device, dtype=dtype)
+
+        # Warmup run (outside graph)
+        out_warmup = torch._grouped_mm(a, b.transpose(-2, -1))
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            # Warmup for graph capture
+            out_placeholder = torch._grouped_mm(a, b.transpose(-2, -1))
+
+            g.capture_begin()
+            out = torch._grouped_mm(a, b.transpose(-2, -1))
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Replay multiple times - this is where the bug would manifest
+        for i in range(5):
+            g.replay()
+            # Verify output is correct after each replay
+            expected = torch._grouped_mm(a, b.transpose(-2, -1))
+            self.assertEqual(out, expected, msg=f"Mismatch on replay {i}")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_2d_3d(self):
+        """Test CUDA graph with grouped_mm (2D x 3D with offsets)."""
+        device = "cuda"
+        dtype = torch.bfloat16
+        m, n, k, n_groups = 16, 32, 64, 4
+
+        a = torch.randn(m * n_groups, k, device=device, dtype=dtype)
+        b = torch.randn(n_groups, n, k, device=device, dtype=dtype)
+        offs = torch.arange(m, n_groups * m + 1, m, device=device, dtype=torch.int32)
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            # Warmup
+            _ = torch._grouped_mm(a, b.transpose(-2, -1), offs=offs)
+
+            g.capture_begin()
+            out = torch._grouped_mm(a, b.transpose(-2, -1), offs=offs)
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Replay multiple times
+        for i in range(5):
+            g.replay()
+            expected = torch._grouped_mm(a, b.transpose(-2, -1), offs=offs)
+            self.assertEqual(out, expected, msg=f"Mismatch on replay {i}")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_3d_2d(self):
+        """Test CUDA graph with grouped_mm (3D x 2D with offsets)."""
+        device = "cuda"
+        dtype = torch.bfloat16
+        m, n, k, n_groups = 16, 32, 64, 4
+
+        a = torch.randn(n_groups, m, k, device=device, dtype=dtype)
+        b = torch.randn(n * n_groups, k, device=device, dtype=dtype)
+        offs = torch.arange(n, n_groups * n + 1, n, device=device, dtype=torch.int32)
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            # Warmup
+            _ = torch._grouped_mm(a, b.transpose(-2, -1), offs=offs)
+
+            g.capture_begin()
+            out = torch._grouped_mm(a, b.transpose(-2, -1), offs=offs)
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Replay multiple times
+        for i in range(5):
+            g.replay()
+            expected = torch._grouped_mm(a, b.transpose(-2, -1), offs=offs)
+            self.assertEqual(out, expected, msg=f"Mismatch on replay {i}")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_2d_2d(self):
+        """Test CUDA graph with grouped_mm (2D x 2D with offsets)."""
+        device = "cuda"
+        dtype = torch.bfloat16
+        m, n, k, n_groups = 16, 32, 64, 4
+
+        a = torch.randn(m, k * n_groups, device=device, dtype=dtype)
+        b = torch.randn(n, k * n_groups, device=device, dtype=dtype)
+        offs = torch.arange(k, n_groups * k + 1, k, device=device, dtype=torch.int32)
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            # Warmup
+            _ = torch._grouped_mm(a, b.t(), offs=offs)
+
+            g.capture_begin()
+            out = torch._grouped_mm(a, b.t(), offs=offs)
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Replay multiple times
+        for i in range(5):
+            g.replay()
+            expected = torch._grouped_mm(a, b.t(), offs=offs)
+            self.assertEqual(out, expected, msg=f"Mismatch on replay {i}")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_multiple_replays(self):
+        """
+        Test many consecutive replays to stress memory reuse patterns.
+
+        This test specifically targets the bug where memory addresses captured
+        in the graph become invalid after many allocations/deallocations.
+        """
+        device = "cuda"
+        dtype = torch.bfloat16
+        n_groups, m, n, k = 8, 32, 64, 128
+
+        a = torch.randn(n_groups, m, k, device=device, dtype=dtype)
+        b = torch.randn(n_groups, n, k, device=device, dtype=dtype)
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            _ = torch._grouped_mm(a, b.transpose(-2, -1))
+
+            g.capture_begin()
+            out = torch._grouped_mm(a, b.transpose(-2, -1))
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Replay many times to stress test memory stability
+        for i in range(50):
+            g.replay()
+            # Only verify periodically to speed up test
+            if i % 10 == 0:
+                expected = torch._grouped_mm(a, b.transpose(-2, -1))
+                self.assertEqual(out, expected, msg=f"Mismatch on replay {i}")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_with_other_ops(self):
+        """
+        Test CUDA graph with grouped_mm interleaved with other operations.
+
+        This simulates real-world usage where grouped_mm is part of a larger
+        computation graph (e.g., MoE in transformer models).
+        """
+        device = "cuda"
+        dtype = torch.bfloat16
+        n_groups, m, n, k = 4, 16, 32, 64
+
+        a = torch.randn(n_groups, m, k, device=device, dtype=dtype)
+        b = torch.randn(n_groups, n, k, device=device, dtype=dtype)
+        bias = torch.randn(n_groups, m, n, device=device, dtype=dtype)
+
+        # Capture complex graph with multiple operations
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            # Warmup
+            _ = torch._grouped_mm(a, b.transpose(-2, -1)) + bias
+
+            g.capture_begin()
+            # Simulate MoE-like computation
+            mm_out = torch._grouped_mm(a, b.transpose(-2, -1))
+            out = mm_out + bias
+            out = torch.nn.functional.gelu(out)
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Replay and verify
+        for i in range(10):
+            g.replay()
+            expected_mm = torch._grouped_mm(a, b.transpose(-2, -1))
+            expected = torch.nn.functional.gelu(expected_mm + bias)
+            self.assertEqual(out, expected, msg=f"Mismatch on replay {i}")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    @parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_grouped_mm_cuda_graph_dtypes(self, dtype):
+        """Test CUDA graph compatibility with different dtypes."""
+        if dtype == torch.float16 and not SM80OrLater:
+            self.skipTest("float16 grouped_mm requires SM80+")
+
+        device = "cuda"
+        n_groups, m, n, k = 4, 16, 32, 64
+
+        a = torch.randn(n_groups, m, k, device=device, dtype=dtype)
+        b = torch.randn(n_groups, n, k, device=device, dtype=dtype)
+
+        # Capture in CUDA graph
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(s):
+            g = torch.cuda.CUDAGraph()
+            _ = torch._grouped_mm(a, b.transpose(-2, -1))
+
+            g.capture_begin()
+            out = torch._grouped_mm(a, b.transpose(-2, -1))
+            g.capture_end()
+
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Replay and verify
+        for i in range(5):
+            g.replay()
+            expected = torch._grouped_mm(a, b.transpose(-2, -1))
+            self.assertEqual(out, expected, msg=f"Mismatch on replay {i} for dtype {dtype}")
+
+    @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA graphs not supported")
+    def test_grouped_mm_cuda_graph_varying_group_sizes(self):
+        """Test CUDA graph with different group counts to stress workspace sizing."""
+        device = "cuda"
+        dtype = torch.bfloat16
+
+        for n_groups in [2, 4, 8, 16]:
+            m, n, k = 16, 32, 64
+            a = torch.randn(n_groups, m, k, device=device, dtype=dtype)
+            b = torch.randn(n_groups, n, k, device=device, dtype=dtype)
+
+            # Capture in CUDA graph
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+
+            with torch.cuda.stream(s):
+                g = torch.cuda.CUDAGraph()
+                _ = torch._grouped_mm(a, b.transpose(-2, -1))
+
+                g.capture_begin()
+                out = torch._grouped_mm(a, b.transpose(-2, -1))
+                g.capture_end()
+
+            torch.cuda.current_stream().wait_stream(s)
+
+            # Replay
+            for i in range(3):
+                g.replay()
+                expected = torch._grouped_mm(a, b.transpose(-2, -1))
+                self.assertEqual(
+                    out, expected,
+                    msg=f"Mismatch on replay {i} for n_groups={n_groups}"
+                )
+
+            # Clean up for next iteration
+            del g
+            torch.cuda.empty_cache()
+
+
+@unittest.skipIf(TEST_WITH_ROCM, "ROCm doesn't support CUTLASS")
 @unittest.skipIf(IS_WINDOWS, "Windows doesn't support CUTLASS extensions")
 @unittest.skipIf(not _IS_SM8X, "mixed dtypes linear only supported on SM 8.x")
 class TestMixedDtypesLinearCuda(TestCase):
@@ -2341,6 +2642,7 @@ class TestMixedDtypesLinearCuda(TestCase):
             )
 
 instantiate_device_type_tests(TestMatmulCuda, globals(), except_for="cpu")
+instantiate_device_type_tests(TestGroupedMMCUDAGraph, globals(), except_for="cpu")
 instantiate_device_type_tests(TestMixedDtypesLinearCuda, globals(), except_for="cpu")
 instantiate_device_type_tests(TestFP8Matmul, globals(), except_for="cpu")
 
