@@ -7428,8 +7428,9 @@ def _meta_grouped_mm_common(
         )
     else:
         torch._check(
-            mat_a.dtype == torch.bfloat16 and mat_b.dtype == torch.bfloat16,
-            lambda: f"Expected inputs of BF16 type but got mat_a.dtype={mat_a.dtype} and mat_b.dtype={mat_b.dtype}.",  # noqa: B950
+            (mat_a.dtype == torch.bfloat16 and mat_b.dtype == torch.bfloat16)
+            or (mat_a.dtype == torch.float16 and mat_b.dtype == torch.float16),
+            lambda: f"Expected inputs of BF16 or FP16 type but got mat_a.dtype={mat_a.dtype} and mat_b.dtype={mat_b.dtype}.",  # noqa: B950
         )
 
     torch._check(
@@ -7607,8 +7608,8 @@ def _meta_grouped_mm_common(
     )
 
     torch._check(
-        out_dtype is None or out_dtype == torch.bfloat16,
-        lambda: "If output dtype provided, it must be torch.bfloat16.",
+        out_dtype is None or out_dtype in (torch.bfloat16, torch.float16),
+        lambda: "If output dtype provided, it must be torch.bfloat16 or torch.float16.",
     )
 
     return _create_grouped_mm_output_tensor(mat_a, mat_b, offs, out_dtype)

@@ -1793,12 +1793,20 @@ std::optional<c10::ScalarType> out_dtype) {
     mat_b.dtype() == at::kBFloat16 &&
     out_dtype.value_or(at::kBFloat16) == at::kBFloat16
   );
-  bool use_fast_path = _scaled_mm_allowed_device(/*sm90_only*/true, /*sm100_only*/true) && a_b_and_out_are_bf16;
+  bool a_b_and_out_are_f16 = (
+    mat_a.dtype() == at::kHalf &&
+    mat_b.dtype() == at::kHalf &&
+    out_dtype.value_or(at::kHalf) == at::kHalf
+  );
+  bool use_cutlass = _scaled_mm_allowed_device(/*sm90_only*/true, /*sm100_only*/true);
   const auto out_dtype_ = _resolve_grouped_mm_out_dtype(mat_a, mat_b, out_dtype);
   Tensor out = create_grouped_gemm_output_tensor(mat_a, mat_b, offs, out_dtype_);
-  if (use_fast_path) {
-    // fast path, no d2h sync needed
+  if (use_cutlass && a_b_and_out_are_bf16) {
+    // fast path for bf16, no d2h sync needed
     at::cuda::detail::bf16bf16_grouped_mm(mat_a, mat_b, offs, bias, out);
+  } else if (use_cutlass && a_b_and_out_are_f16) {
+    // fast path for f16, no d2h sync needed
+    at::cuda::detail::f16f16_grouped_mm(mat_a, mat_b, offs, bias, out);
   } else {
     _grouped_mm_fallback(mat_a, mat_b, offs, bias, out_dtype, out);
   }

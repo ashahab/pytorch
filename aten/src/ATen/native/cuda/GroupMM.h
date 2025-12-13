@@ -9,4 +9,11 @@ TORCH_API void bf16bf16_grouped_mm(
     std::optional<at::Tensor> offs,
     std::optional<at::Tensor> bias, // BF16
     at::Tensor& out);
+
+TORCH_API void f16f16_grouped_mm(
+    at::Tensor mat_a, // f16
+    at::Tensor mat_b, // f16
+    std::optional<at::Tensor> offs,
+    std::optional<at::Tensor> bias, // F16
+    at::Tensor& out);
 } // namespace at::cuda::detail
